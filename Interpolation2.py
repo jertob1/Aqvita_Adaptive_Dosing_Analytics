@@ -5,95 +5,111 @@ from scipy.interpolate import LinearNDInterpolator
 from dataFile import get_trainingData
 import json
 
+# === Load Data ===
 X, TDS = get_trainingData()
-
-# === 3. Create interpolator
 interpolator = LinearNDInterpolator(X, TDS)
 
-# Initial conditions
-valveTime = 25
-cumulativeTime = valveTime * 25  # First cycle
-tds = interpolator(valveTime, cumulativeTime)
+# === Parameters ===
+VALVE_MIN = 25
+VALVE_STEP = 3
+VALVE_MAX = 300
+CUMULATIVE_MIN = 625
+CUMULATIVE_STEP = 75
+CUMULATIVE_MAX = 42000
 
-# Store results
-matches = []
-cumulative_times = []
+# === Generate grid for ESP32 header (valve_times and times)
+valve_times_grid = np.arange(VALVE_MIN, VALVE_MAX, VALVE_STEP)
+cumulative_times_grid = np.arange(CUMULATIVE_MIN, CUMULATIVE_MAX, CUMULATIVE_STEP)
 
-# Define search range
-valve_times = np.arange(25, 300, 1)
-target_min, target_max = 90, 120
-target_tds = 100
+def generate_lookup_table():
+    """Generate C++ header file with interpolated TDS values."""
+    header_lines = [
+        f"const int VALVE_MIN = {VALVE_MIN};",
+        f"const int VALVE_STEP = {VALVE_STEP};",
+        f"const int CUMULATIVE_MIN = {CUMULATIVE_MIN};",
+        f"const int CUMULATIVE_STEP = {CUMULATIVE_STEP};",
+        f"const float TDS_LOOKUP[{len(valve_times_grid)}][{len(cumulative_times_grid)}] = {{"
+    ]
 
-while tds is not None and target_min <= tds <= target_max:
-    cumulative_times.append(cumulativeTime)
-    matches.append((valveTime, cumulativeTime, tds))
+    for vt in valve_times_grid:
+        row = []
+        for ct in cumulative_times_grid:
+            tds = interpolator(vt, ct)
+            if tds is None or np.isnan(tds):
+                row.append("-1.0")
+            else:
+                row.append(f"{tds:.2f}")
+        header_lines.append("    {" + ", ".join(row) + "},")
+    header_lines.append("};")
 
-    # Step 1: Find best next valve time
-    best_vt = valveTime
-    min_diff = float('inf')
+    with open("TDS_Lookup.h", "w") as f:
+        f.write("\n".join(header_lines))
 
-    #===== Adaptive Dosing routine
-    for vt in valve_times:
-        next_time = cumulativeTime + vt * 25  # Next full injection cycle
-        temp_tds = interpolator(vt, next_time)
-        if temp_tds is not None:
-            diff = abs(temp_tds - target_tds)
-            if diff < min_diff:
-                min_diff = diff
-                best_vt = vt
-    
-    # Step 2: Update valveTime and cumulativeTime
-    valveTime = best_vt
-    cumulativeTime += valveTime * 25
+
+def main():
+    print("Generating TDS Lookup Header...")
+    generate_lookup_table()
+
+    # Initial conditions
+    valveTime = 25
+    cumulativeTime = valveTime * 25  # First cycle
     tds = interpolator(valveTime, cumulativeTime)
 
-#=== 6. Show the result (example print)
-# print(len(matches))
-# for (vt, ct, tds) in matches:
-#    print(f"Valve time: {vt} ms, Cumulative time: {ct} ms → TDS₀ ≈ {tds:.2f} ppm")
+    # Store results
+    matches = []
+    cumulative_times = []
 
-# === Plotting
-plt.figure(figsize=(12, 6))
+    # Define search range
+    valve_times = np.arange(25, 300, 3)
+    target_min, target_max = 90, 120
+    target_tds = 100
 
-valve_times_to_plot = np.arange(25, 301, 20)
-timePlot = np.arange(625, 45000, 100)
+    while tds is not None and target_min <= tds <= target_max:
+        cumulative_times.append(cumulativeTime)
+        matches.append((valveTime, cumulativeTime, tds))
 
-for (vt, a, b) in matches:
-    tds_values = [interpolator(vt, ct) for ct in timePlot]
-    if all(t is not None for t in tds_values):  # Avoid broken lines
-        plt.plot(timePlot, tds_values, label=f'{vt} ms')
+        # Step 1: Find best next valve time
+        best_vt = valveTime
+        min_diff = float('inf')
 
-plt.xlabel("Cumulative Valve Open Time (ms)")
-plt.ylabel("Predicted TDS₀ (ppm)")
-plt.title("Interpolated TDS₀ vs. Cumulative Time\n(Every 10ms Valve Time Step from 25ms to 300ms)")
-plt.legend(loc='upper right', fontsize='small', ncol=2)
-plt.grid(True)
-plt.tight_layout()
-# plt.show()
+        #===== Adaptive Dosing routine
+        for vt in valve_times:
+            next_time = cumulativeTime + vt * 25  # Next full injection cycle
+            temp_tds = interpolator(vt, next_time)
+            if temp_tds is not None:
+                diff = abs(temp_tds - target_tds)
+                if diff < min_diff:
+                    min_diff = diff
+                    best_vt = vt
+        
+        # Step 2: Update valveTime and cumulativeTime
+        valveTime = best_vt
+        cumulativeTime += valveTime * 25
+        tds = interpolator(valveTime, cumulativeTime)
 
-#=====Create header file with data for ESP32 to be read in C++
-times = np.arange(625,45000,25)
+    #=== 6. Show the result (example print)
+    # print(len(matches))
+    # for (vt, ct, tds) in matches:
+    #    print(f"Valve time: {vt} ms, Cumulative time: {ct} ms → TDS₀ ≈ {tds:.2f} ppm")
 
-header_lines = []
+    # === Plotting
+    plt.figure(figsize=(12, 6))
 
-#Append the parameters of model.
-header_lines.append("const int VALVE_MIN = 25;")
-header_lines.append("const int VALVE_STEP = 1;")
-header_lines.append("const int CUMULATIVE_MIN = 625;")
-header_lines.append("const int CUMULATIVE_STEP = 25;")
+    valve_times_to_plot = np.arange(25, 301, 20)
+    timePlot = np.arange(625, 45000, 100)
 
-header_lines.append("const float TDS_LOOKUP[276][1776] = {")
+    for (vt, a, b) in matches:
+        tds_values = [interpolator(vt, ct) for ct in timePlot]
+        if all(t is not None for t in tds_values):  # Avoid broken lines
+            plt.plot(timePlot, tds_values, label=f'{vt} ms')
 
-for vt in valve_times:
-    row = []
-    for ct in times:
-        tds = interpolator(vt, ct)
-        if tds is None or np.isnan(tds):
-            row.append("-1.0")
-        else:
-            row.append(f"{tds:.2f}")
-    header_lines.append("    {" + ", ".join(row) + "},")
-header_lines.append("};")
+    plt.xlabel("Cumulative Valve Open Time (ms)")
+    plt.ylabel("Predicted TDS₀ (ppm)")
+    plt.title("Interpolated TDS₀ vs. Cumulative Time\n(Every 10ms Valve Time Step from 25ms to 300ms)")
+    plt.legend(loc='upper right', fontsize='small', ncol=2)
+    plt.grid(True)
+    plt.tight_layout()
+    # plt.show()
 
-with open("TDS_Lookup.h", "w") as f:
-    f.write("\n".join(header_lines))
+if __name__ == "__main__":
+    main()
